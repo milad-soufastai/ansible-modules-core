@@ -392,7 +392,6 @@ author:
     - "Cove Schneider (@cove)"
     - "Joshua Conner (@joshuaconner)"
     - "Pavel Antonov (@softzilla)"
-    - "Ash Wilson (@smashwilson)"
     - "Thomas Steinbach (@ThomasSteinbach)"
     - "Philippe Jandot (@zfil)"
     - "Daan Oosterveld (@dusdanig)"
@@ -525,7 +524,12 @@ import sys
 import json
 import os
 import shlex
-from urlparse import urlparse
+try:
+    from urlparse import urlparse
+except ImportError:
+    # python3
+    from urllib.parse import urlparse
+
 try:
     import docker.client
     import docker.utils
@@ -586,13 +590,13 @@ def get_split_image_tag(image):
     else:
         registry, resource = None, image
 
-    # now we can determine if image has a tag
-    if ':' in resource:
-        resource, tag = resource.split(':', 1)
-        if registry:
-            resource = '/'.join((registry, resource))
-        if tag == "":
-            tag = "latest"
+    # now we can determine if image has a tag or a digest
+    for s in ['@',':']:
+        if s in resource:
+            resource, tag = resource.split(s, 1)
+            if registry:
+                resource = '/'.join((registry, resource))
+            break
     else:
         tag = "latest"
         resource = image
@@ -696,7 +700,7 @@ class DockerManager(object):
         self.binds = None
         self.volumes = None
         if self.module.params.get('volumes'):
-            self.binds = {}
+            self.binds = []
             self.volumes = []
             vols = self.module.params.get('volumes')
             for vol in vols:
@@ -714,7 +718,7 @@ class DockerManager(object):
                             self.module.fail_json(msg='invalid bind mode ' + parts[2])
                         else:
                             mode = parts[2]
-                    self.binds[parts[0]] = {'bind': parts[1], 'mode': mode }
+                    self.binds.append("%s:%s:%s" % (parts[0], parts[1], mode))
                 else:
                     self.module.fail_json(msg='volumes support 1 to 3 arguments')
 
@@ -1367,14 +1371,8 @@ class DockerManager(object):
 
             expected_binds = set()
             if self.binds:
-                for host_path, config in self.binds.iteritems():
-                    if isinstance(config, dict):
-                        container_path = config['bind']
-                        mode = config['mode']
-                    else:
-                        container_path = config
-                        mode = 'rw'
-                    expected_binds.add("{0}:{1}:{2}".format(host_path, container_path, mode))
+                for bind in self.binds:
+                    expected_binds.add(bind)
 
             actual_binds = set()
             for bind in (container['HostConfig']['Binds'] or []):
@@ -1544,10 +1542,17 @@ class DockerManager(object):
 
                 image_matches = running_image in repo_tags
 
-                command_matches = command == details['Config']['Cmd']
-                entrypoint_matches = (
-                    entrypoint == details['Config']['Entrypoint']
-                )
+                if command == None:
+                    command_matches = True
+                else:
+                    command_matches = (command == details['Config']['Cmd'])
+
+                if entrypoint == None:
+                    entrypoint_matches = True
+                else:
+                    entrypoint_matches = (
+                        entrypoint == details['Config']['Entrypoint']
+                    )
 
                 matches = (image_matches and command_matches and
                            entrypoint_matches)
@@ -1833,7 +1838,7 @@ def absent(manager, containers, count, name):
 def main():
     module = AnsibleModule(
         argument_spec = dict(
-            count           = dict(default=1),
+            count           = dict(default=1, type='int'),
             image           = dict(required=True),
             pull            = dict(required=False, default='missing', choices=['missing', 'always']),
             entrypoint      = dict(required=False, default=None, type='str'),
@@ -1842,22 +1847,22 @@ def main():
             ports           = dict(required=False, default=None, type='list'),
             publish_all_ports = dict(default=False, type='bool'),
             volumes         = dict(default=None, type='list'),
-            volumes_from    = dict(default=None),
+            volumes_from    = dict(default=None, type='list'),
             links           = dict(default=None, type='list'),
             devices         = dict(default=None, type='list'),
-            memory_limit    = dict(default=0),
-            memory_swap     = dict(default=0),
-            cpu_shares      = dict(default=0),
+            memory_limit    = dict(default=0, type='int'),
+            memory_swap     = dict(default=0, type='int'),
+            cpu_shares      = dict(default=0, type='int'),
             docker_url      = dict(),
             use_tls         = dict(default=None, choices=['no', 'encrypt', 'verify']),
-            tls_client_cert = dict(required=False, default=None, type='str'),
-            tls_client_key  = dict(required=False, default=None, type='str'),
-            tls_ca_cert     = dict(required=False, default=None, type='str'),
+            tls_client_cert = dict(required=False, default=None, type='path'),
+            tls_client_key  = dict(required=False, default=None, type='path'),
+            tls_ca_cert     = dict(required=False, default=None, type='path'),
             tls_hostname    = dict(required=False, type='str', default=None),
             docker_api_version = dict(required=False, default=DEFAULT_DOCKER_API_VERSION, type='str'),
             docker_user     = dict(default=None),
             username        = dict(default=None),
-            password        = dict(),
+            password        = dict(no_log=True),
             email           = dict(),
             registry        = dict(),
             hostname        = dict(default=None),
@@ -1900,7 +1905,7 @@ def main():
 
     try:
         manager = DockerManager(module)
-        count = int(module.params.get('count'))
+        count = module.params.get('count')
         name = module.params.get('name')
         pull = module.params.get('pull')
 
